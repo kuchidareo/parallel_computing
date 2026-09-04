@@ -1,0 +1,225 @@
+---
+title: "Homework 01 - Reo Kuchida"
+format: html
+jupyter: python3
+execute:
+  echo: true
+  warning: false
+---
+
+I declare that I use genAI (especially codex).
+About project management, I am using qmd, which is kind of jupyter notebook (ipynb), but more flexible.
+I will submit the pdf version of outputs and the raw codes zip file.
+
+```{python}
+import time
+from statistics import median
+
+import matplotlib.pyplot as plt
+import numpy as np
+from threadpoolctl import threadpool_info, threadpool_limits
+```
+
+## Exercise 1.1
+
+Now I can connect to
+
+```bash
+ssh kuchida@172.17.66.61
+```
+
+## Exercise 1.2
+
+### 1.2.1 Measuring time
+
+```{python}
+start = time.perf_counter()
+total = 0
+for i in range(10**7):
+    total += i
+elapsed = time.perf_counter() - start
+
+print("sum =", total)
+print("wall time =", elapsed)
+```
+
+### 1.2.2 NumPy tutorial
+
+```{python}
+A = np.array([[1, 2], [3, 4]])
+B = np.array([[5, 6], [7, 8]])
+print("matrix product:\n", A @ B)
+```
+Numpy is basically faster than original Python, because there are many optimized low-level processors written in C/Fortran. 
+And since we clarify the data type like the other programming language, that also speed up the processings. 
+
+### 1.2.3 NumPy optimized libraries
+
+The BLAS backend and active thread count depend on the environment.
+
+```bash
+for p in 1 2 4 8; do
+    OPENBLAS_NUM_THREADS=$p python3 benchmark-numpy-dot.py
+done
+```
+
+### 1.2.4 `numpy.dot()` performance
+
+```{python}
+import os
+import re
+import subprocess
+import matplotlib.pyplot as plt
+
+thread_counts = [1, 2, 4, 8, 16, 32, 64, 128]
+times = []
+
+for p in thread_counts:
+    env = os.environ.copy()
+    env["OPENBLAS_NUM_THREADS"] = str(p)
+
+    result = subprocess.run(
+        ["python3", "benchmark-numpy-dot.py"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    match = re.search(r"median:\s*([0-9.eE+-]+)", result.stdout)
+    times.append(float(match.group(1)))
+
+plt.plot(thread_counts, times, "o-")
+plt.xscale("log", base=2)
+plt.xlabel("OPENBLAS_NUM_THREADS")
+plt.ylabel("Median time (seconds)")
+plt.title("numpy.dot() performance")
+plt.grid()
+plt.show()
+```
+
+### 1.2.5 Curve fitting
+
+First I changed leastsquares.py's n=50 to n=123. 
+```{python}
+import subprocess
+from IPython.display import Image, display
+
+result = subprocess.run(
+    ["python3", "leastsquares.py"],
+    capture_output=True,
+    text=True,
+    check=True,
+)
+
+print(result.stdout)
+display(Image("leastsquares.png"))
+```
+
+## Exercise 1.3
+
+### 1.3.1 Recursive and iterative algorithm
+
+```{python}
+counter = 0
+
+def my_fib(n):
+    global counter
+
+    counter += 1
+    if n == 0:
+        return 0
+    elif n == 1:
+        return 1
+    else:
+        return my_fib(n-1) + my_fib(n-2)
+```
+
+```{python}
+#Iterative fibonacci series, gives the complexity of O(n)
+itr_counter = 0
+def itr_fib(n):
+    global itr_counter
+    if n == 0:
+        return 0
+    else:
+        fib = [0]*n
+        fib.insert(1,1)
+        result = 0
+        for i in range(2,n+1): 
+            itr_counter +=1
+            fib[i] = fib[i-1] + fib[i-2]             
+    return fib[n]
+```
+
+```{python}
+fib_n = [4, 7, 14, 21]
+iterative_times = []
+recursive_times = []
+
+for n in fib_n:
+    start = time.perf_counter()
+    iterative = itr_fib(n)
+    iterative_times.append(time.perf_counter() - start)
+
+    start = time.perf_counter()
+    recursive = my_fib(n)
+    recursive_times.append(time.perf_counter() - start)
+
+    print("n =", n)
+    print("Iterative =", iterative, "Time =", iterative_times[-1])
+    print("Recursive =", recursive, "Time =", recursive_times[-1])
+```
+
+For the larger tested values, the iterative version is faster.
+
+### 1.3.2 Matrix-theoretic algorithm
+
+```{python}
+F = np.array([[0, 1], [1, 1]], dtype=object)
+
+
+def matrix_power(matrix, n):
+    if n == 0:
+        return np.array([[1, 0], [0, 1]], dtype=object)
+    half = matrix_power(matrix, n // 2)
+    if n % 2 == 0:
+        return half @ half
+    return matrix @ half @ half
+
+
+def matrix_fib(n):
+    return int(matrix_power(F, n)[0, 1])
+
+
+np.testing.assert_equal(matrix_fib(0), 0)
+np.testing.assert_equal(matrix_fib(1), 1)
+np.testing.assert_equal(matrix_fib(2), 1)
+np.testing.assert_equal(matrix_fib(90), 2880067194370816120)
+np.testing.assert_equal(matrix_fib(45), 1134903170)
+```
+The key idea is the same from the repeated squaring algorithm.
+if n % 2 == 0, then use the combination of (n/2, n/2).
+if not, use the combination of (n/2 -1, n/2). 
+In general, we can use this approach, if the value of n is expressed by the value of n/k.
+But for example, LLM inferernce workload, the next token(n) depends on the previous token(n-1).
+In that case, we cannot use this trick. This is somehow related to my research field.
+
+```{python}
+matrix_times = []
+for n in fib_n:
+    start = time.perf_counter()
+    matrix_fib(n)
+    matrix_times.append(time.perf_counter() - start)
+
+plt.semilogy(fib_n, recursive_times, "o-", label="recursive")
+plt.semilogy(fib_n, matrix_times, "o-", label="matrix")
+plt.xlabel("n")
+plt.ylabel("Time (s)")
+plt.legend()
+plt.grid(True)
+plt.show()
+```
+
+Repeated squaring uses $O(\log n)$ matrix multiplications. 
+This visualization clearly shows it.
