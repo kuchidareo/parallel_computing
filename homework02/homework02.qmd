@@ -1,0 +1,239 @@
+## Exercise 2.1
+
+I copied omp_hello.c and compiled with 
+
+```bash
+gcc -fopenmp omp_hello.c -o hello
+```
+
+now can I run 
+
+```bash
+./hello
+```
+
+and I can change the thread by changing OMP_NUM_THREADS
+
+```bash
+export OMP_NUM_THREADS=8
+./hello
+```
+
+Output:
+
+```{python}
+import os
+import subprocess
+
+subprocess.run(["gcc", "-fopenmp", "omp_hello.c", "-o", "hello"], check=True)
+
+env = os.environ.copy()
+env["OMP_NUM_THREADS"] = "8"
+result = subprocess.run(["./hello"], env=env, capture_output=True, text=True, check=True)
+print(result.stdout)
+```
+
+And finally, I made some test code to get myself familiarize.
+
+I understand that the fundamental part is to identify which parts can be parallelized and be careful about dependencies.
+
+If the parallel processes are independent, then we can simply use `omp parallel for`. 
+
+```cpp
+#pragma omp parallel for
+for (int i = 0; i < N; i++) {
+    a[i] = b[i] + c[i];
+}
+```
+
+But if the parallel processes are treating one global variable, such as summing it up. We need to be careful. we can use `reduction` to ensure the summing is happening one by one.
+
+```c
+int sum = 0;
+#pragma omp parallel for reduction(+:sum)
+for (int i = 1; i <= max; i++) {
+	sum = sum + i;
+}
+```
+
+Function parallelism is usually more complex because it involves dependencies. We can use `omp single` to ensure that each task is created only once, and `omp task` to allow the tasks to run in parallel. So, without `single`, each thread may create its own `foo`, `bar`, and `baz` tasks, causing them to run multiple times. Without `task`, `foo`, `bar`, and `baz` are executed sequentially by a single thread.
+
+```c
+#pragma omp parallel
+{
+    #pragma omp single
+    {
+        #pragma omp task
+        foo();
+        #pragma omp task
+        bar();
+        #pragma omp task
+        baz();
+    }
+}
+```
+
+And these are important for controlling and evaluating the processes. 
+
+```c
+// omp_get_num_threads()
+// omp_set_num_threads()
+// omp_get_thread_num()
+// omp_get_wtime()
+
+#include <stdio.h>
+#include <omp.h>
+
+int main(void)
+{
+    omp_set_num_threads(4);
+    double start = omp_get_wtime();
+    #pragma omp parallel
+    {
+        int id = omp_get_thread_num();
+        int num_threads = omp_get_num_threads();
+        printf("Hello from thread %d of %d\n",
+               id, num_threads);
+    }
+    double end = omp_get_wtime();
+    printf("Execution time: %f seconds\n", end - start);
+    return 0;
+}
+```
+
+```{python}
+import subprocess
+
+subprocess.run(["gcc", "-fopenmp", "omp_threads_test.c", "-o", "threads_test"], check=True)
+result = subprocess.run(["./threads_test"], capture_output=True, text=True, check=True)
+print(result.stdout)
+```
+
+## Exercise 2.2
+
+The intuition I got from `omp_mm.c` sample code is, in matrix multiplication, each row of the result is independent.
+In the implementation, `schedule (static, chunk)` assings fixed 10 chunks of parallel processing, which is 10 rows not one by one though.  
+
+And I believe, even each cell of the result should be independent. So I made a custom code `omp_mm_cell.c`.
+
+```c
+// ORIGINAL CODE
+// #pragma omp for schedule (static, chunk)
+// for (i=0; i<NRA; i++)
+//   {
+//   printf("Thread=%d did row=%d\n",tid,i);
+//   for(j=0; j<NCB; j++)
+//     for (k=0; k<NCA; k++)
+//       c[i][j] += a[i][k] * b[k][j];
+//   }
+// /*** End of parallel region ***/
+
+// NEW CODE CELL UNIT PARALLELIZATION.
+#pragma omp for collapse(2) schedule(static, chunk)
+for (i = 0; i < NRA; i++) {
+    for (j = 0; j < NCB; j++) {
+
+        printf("Thread=%d did cell=(%d,%d)\n", tid, i, j);
+
+        for (k = 0; k < NCA; k++)
+            c[i][j] += a[i][k] * b[k][j];
+    }
+}
+```
+
+By adding `omp_get_wtime()`, I measured each strategy and compared them by changing the number of threads with `omp_set_num_threads()`.
+One warm-up run and 5 measurement runnings, and reporting the median.
+
+```{python}
+import subprocess
+
+subprocess.run(["gcc", "-fopenmp", "omp_mm.c", "-o", "mm"], check=True)
+subprocess.run(["gcc", "-fopenmp", "omp_mm_cell.c", "-o", "mm_cell"], check=True)
+
+for threads in [1, 2, 4, 8, 16, 32, 64]:
+    print("Threads:", threads)
+    for name, program in [("Row", "./mm"), ("Cell", "./mm_cell")]:
+        result = subprocess.run(
+            [program, str(threads)], capture_output=True, text=True, check=True
+        )
+        median_time = next(
+            line for line in result.stdout.splitlines() if "Median elapsed time" in line
+        )
+        print(name, "strategy:", median_time)
+```
+
+The result is interesting. I interpret it that the overhead of coordination (in the cell strategy, handling much more parallel processings) is higher. 
+
+## Exercise 2.3
+
+### Task 2.3.1
+By adding `omp_get_wtime()`, I measured the elapsed time of the naive serial and recursive serial versions. Here is the result.
+
+```{python}
+import subprocess
+
+subprocess.run(["g++", "-fopenmp", "matmul_recur.cpp", "-o", "matmul_recur"], check=True)
+
+for size in [10, 100, 500, 1000]:
+    print("Matrix dimensions:", size, size, size)
+    result = subprocess.run(
+        ["./matmul_recur", str(size), str(size), str(size)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    print(result.stdout)
+    if size == 1000:
+        line = next(line for line in result.stdout.splitlines() if "T recursive median" in line)
+        serial_recursive_median = float(line.split()[4])
+```
+
+I was surprised that the recurrsive is faster.
+I actually didn't understand why, but genAI suggested reasonable hypothesis, this is because of cache efficiency.
+I tried to evaluate it by using 'perf' counter with L1 cache behavior, but unfortunately I was not allowed to install these in the parcomp computer.
+
+### Task 2.3.2
+By thinking which part can be independent in the recursive approach, These C00, C01, C10, C11 these 4 processes are independent.
+So, in essense by setting these 2 functions as one task,
+```c
+#pragma omp task
+{
+    // C00 += A00 * B00
+		matmultrec(mf, mf+(ml-mf)/2, nf, nf+(nl-nf)/2, pf, pf+(pl-pf)/2, A, B, C);
+    // C00 += A01 * B10
+        matmultrec(mf, mf+(ml-mf)/2, nf, nf+(nl-nf)/2, pf+(pl-pf)/2, pl, A, B, C);
+}
+```
+
+I compared $T_{recursive,1}$ with $T_{recursive,p}$ using 1, 2, 4, and 8 threads.
+
+```{python}
+import os
+import subprocess
+
+subprocess.run(
+    ["g++", "-fopenmp", "matmul_recur_parallel.cpp", "-o", "matmul_recur_parallel"],
+    check=True,
+)
+
+print("T recursive,1 median:", serial_recursive_median, "seconds")
+for threads in [1, 2, 4, 8]:
+    env = os.environ.copy()
+    env["OMP_NUM_THREADS"] = str(threads)
+    result = subprocess.run(
+        ["./matmul_recur_parallel"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    line = next(line for line in result.stdout.splitlines() if "T recursive median" in line)
+    parallel_recursive_median = float(line.split()[4])
+    print("Threads:", threads)
+    print("T recursive,p median:", parallel_recursive_median, "seconds")
+    print("T recursive,1 / T recursive,p:", serial_recursive_median / parallel_recursive_median)
+```
+
+### bonus exercise 2
+Don’t give me the bonus points; I didn’t do any implementations. This is just out of curiosity.
+I understand that this exercise is about load imbalance in parallel processing. The amount of work varies across the tiles; in that case, parallel processing would be inefficient.
