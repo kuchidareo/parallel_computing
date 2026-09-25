@@ -1,0 +1,229 @@
+## Excercise 4.1
+Basically trap-parallel_1.py is just summing up the result from each rank. So we can apply reduce. 
+
+```python
+
+# if rank == 0:
+#         total = integral[0]
+#         for i in range(1, size):
+#                 comm.Recv(recv_buffer, ANY_SOURCE)
+#                 total += recv_buffer[0]
+# else:
+#         # all other process send their result
+#         comm.Send(integral,0)
+# # root process prints results
+# if comm.rank == 0:
+#         print("With n =", n, "trapezoids, our estimate of the integral from"\
+#         , a, "to", b, "is", total)
+
+total = comm.reduce(integral[0], op=MPI.SUM, root=0)
+```
+And I confirmed that the reslt is same by `numpy.testing.assert_allclose(total, serial, rtol=1e-12, atol=1e-12)`.
+
+```{python}
+import subprocess
+
+for ranks in [1, 2, 4]:
+    result = subprocess.run(
+        ["mpirun", "-n", str(ranks), "python", "trap-parallel_1.py",
+         "0.0", "1.0", "10000"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    print("Ranks:", ranks)
+    print(result.stdout)
+```
+
+Matrix-vector multiplications:
+
+I believe the purpose of this parallelization is not for speed. Because this function is dependent on the previous output, hard to exploit multiple ranks resources. The one we implemented at the first practical session would be faster.
+So, I implemented it by communicating with rank 0 each time.
+
+```python
+if rank == 0:
+    for worker in range(1, size):
+        comm.send(x, dest=worker)
+        x = comm.recv(source=worker)
+else:
+    x = comm.recv(source=0)
+    x = A @ x
+    comm.send(x, dest=0)
+```
+
+```{python}
+import subprocess
+
+result = subprocess.run(
+    ["mpirun", "-n", "4", "python", "matrix-vector.py"],
+    capture_output=True,
+    text=True,
+    check=True,
+)
+print(result.stdout)
+```
+And I confirmed that the reslt is same by `np.testing.assert_allclose(x, expected)`.
+
+## Excercise 4.2
+
+Now I understand what I need to understand though this assignment. Each row can be calculated independently. So calculating matmul (Ax) can be parallelized, and then apply `Allgather` to finish the calculation. then do the same thing K times.
+
+More specifically, Each row of \(A\) can be processed independently, so the matrix is divided into contiguous row blocks using `Scatter`. Each rank stores only its local rows of \(A\), while `Bcast` gives every rank the full current vector \(x\). During each iteration, every rank computes its local part of \(A x\) independently. `Allgather` then combines these local results and distributes the complete new vector to all ranks for the next iteration. In the final iteration, `Gather` is sufficient because only rank 0 needs the result. Repeating this process \(K\) times correctly computes \(A^K x\).
+
+```python
+def Ax_rowblock(A, x, K):
+    matrix_n = comm.bcast(A.shape[0] if rank == 0 else None, root=0)
+    rows_per_rank = matrix_n // size
+
+    if K == 0:
+        return x.copy() if rank == 0 else None
+
+    # Distributing the independent rows of A.
+    local_A = np.empty((rows_per_rank, matrix_n), dtype=np.float64)
+    comm.Scatter(
+        A if rank == 0 else None,
+        local_A,
+        root=0
+    )
+
+    # Distributing the x.
+    if rank == 0:
+        current_x = x.copy()
+    else:
+        current_x = np.empty(matrix_n, dtype=np.float64)
+    comm.Bcast(current_x, root=0)
+
+    # Calculation.
+    for step in range(K):
+        local_y = local_A @ current_x
+
+        if step < K - 1:
+            comm.Allgather(local_y, current_x)
+        else:
+            if rank == 0:
+                result = np.empty(matrix_n, dtype=np.float64)
+            else:
+                result = None
+
+            comm.Gather(local_y, result, root=0)
+
+    return result if rank == 0 else None
+```
+
+```{python}
+
+# N=64
+# K_VALUES = [0, 1, 5]
+
+result = subprocess.run(
+    ["mpirun", "-n", "4", "python", "a4_test.py"],
+    capture_output=True,
+    text=True,
+    check=True,
+)
+
+print(result.stdout)
+```
+
+The cases `K = 0, 1, 5` are compared with a serial NumPy result.
+
+```{python}
+result = subprocess.run(
+    ["mpirun", "-n", "4", "python", "a4_test_final.py", "a4_test.py"],
+    capture_output=True,
+    text=True,
+    check=True,
+)
+print(result.stdout)
+```
+And the final test passed.
+
+## Excercise 4.3
+
+I expect that the communication cost such as `Allgather` will be the bottleneck to certain point.
+The benchmark checks correctness, performs one warm-up and five measured runs, and records the medium rank time. BLAS uses one thread per rank.
+
+Experiment design:
+I chose `N = 4096`, `K = 10` so that N is devided by all P candidates and around 128MB in total, and K is stable not too short.
+
+For result formatting: I used GenAI a lot.
+
+```{python}
+import json
+import os
+import statistics
+import subprocess
+import matplotlib.pyplot as plt
+from IPython.display import Markdown, display
+
+ranks = [1, 2, 4, 8, 16, 32]
+results = []
+env = os.environ.copy()
+env.update({"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"})
+
+for p in ranks:
+    run = subprocess.run(
+        ["mpirun", "-n", str(p), "python", "a4_benchmark.py"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    data = json.loads(run.stdout.strip().splitlines()[-1])
+    data["kernel"] = statistics.median(data["kernel_times"])
+    data["end"] = statistics.median(data["end_to_end_times"])
+    results.append(data)
+
+kernel_base = results[0]["kernel"]
+end_base = results[0]["end"]
+for row in results:
+    row["kernel_s"] = kernel_base / row["kernel"]
+    row["end_s"] = end_base / row["end"]
+
+raw_table = ["| P | Kernel raw times (s) | End-to-end raw times (s) |",
+             "|:---:|:---|:---|"]
+for row in results:
+    kernel_raw = ", ".join(f"{x:.6f}" for x in row["kernel_times"])
+    end_raw = ", ".join(f"{x:.6f}" for x in row["end_to_end_times"])
+    raw_table.append(f"| {row['ranks']} | {kernel_raw} | {end_raw} |")
+display(Markdown("\n".join(raw_table)))
+
+summary_table = [
+    "| P | Kernel T (s) | Kernel S | Kernel E | E-to-e T (s) | E-to-e S | E-to-e E |",
+    "|:---:|---:|---:|---:|---:|---:|---:|",
+]
+for row in results:
+    p = row["ranks"]
+    summary_table.append(
+        f"| {p} | {row['kernel']:.6f} | {row['kernel_s']:.3f} | "
+        f"{row['kernel_s'] / p:.3f} | {row['end']:.6f} | "
+        f"{row['end_s']:.3f} | {row['end_s'] / p:.3f} |"
+    )
+display(Markdown("\n".join(summary_table)))
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+axes[0].plot(ranks, [r["kernel"] for r in results], "o-", label="Kernel")
+axes[0].plot(ranks, [r["end"] for r in results], "o-", label="End-to-end")
+axes[0].set(xlabel="MPI ranks", ylabel="Median runtime (seconds)", xscale="log", yscale="log")
+axes[0].set_xticks(ranks, ranks)
+axes[0].legend()
+
+axes[1].plot(ranks, [r["kernel_s"] for r in results], "o-", label="Kernel")
+axes[1].plot(ranks, [r["end_s"] for r in results], "o-", label="End-to-end")
+axes[1].plot(ranks, ranks, "--", label="Ideal")
+axes[1].set(xlabel="MPI ranks", ylabel="Speedup", xscale="log", yscale="log")
+axes[1].set_xticks(ranks, ranks)
+axes[1].legend()
+fig.suptitle("Strong scaling, N=4096, K=10")
+plt.tight_layout()
+plt.show()
+
+info = results[0]
+print("Host:", info["host"], "MPI:", info["mpi"])
+print("mpi4py:", info["mpi4py"], "NumPy:", info["numpy"])
+print("Threads:", info["threads"])
+```
+I think we can draw two main conclusions from the experiment.
+
+First, the distribution of (A) adds about 0.025 s of overhead (end-to-end - kernel times). This cost does not disappear as more ranks are added, and it becomes relatively more important when the computation itself gets faster.
+
+Second, the parallelized computation does not scale ideally because of the communication bottleneck. As the number of ranks increases, communication and synchronization between ranks become a larger part of the total runtime, limiting the achievable speedup.
+
+Overall, both effects show that parallelization is most effective when the communication and coordination costs are small compared with the amount of computation distributed across ranks.
