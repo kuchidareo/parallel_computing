@@ -1,0 +1,227 @@
+## Exercise 7.1
+
+The point of this task is updating the local_B with next_B. next_B is the next column (`rank+1 % size`) of the B.  
+Question 7.1a: In each ring step, part of the local_C's column (`q*n : (q+1)*n`) is updated, and else part is just null. So, until the end of the ring, local_C is being updated, and these updates are independent from the other processes, no need to communicate with the other processes.  
+Question 7.1b: The wrong case (deadlock) is, every sending process is waiting for being received. And by running `Send` then `Recv` might lead to this situation, because `Recv` is running after finishing `Send`. `SendRecv` starts sending and receiving as one operation avoiding deadlock. 
+
+```python
+def ring_matrix_multiplication(A_rowbl, B_colbl):
+    matrix_n = comm.bcast(A_rowbl.shape[1] if rank == 0 else None, root=0)
+    n = matrix_n // size
+
+    if matrix_n % size != 0:
+        raise ValueError("matrix_n must be divisible by size")
+
+    local_A = np.ascontiguousarray(A_rowbl, dtype=np.float64)
+    local_B = np.ascontiguousarray(B_colbl, dtype=np.float64).copy()
+
+    local_C = np.empty((n, matrix_n), dtype=np.float64)
+    next_B = np.empty_like(local_B)
+
+    # Calculation.
+    for step in range(size):
+        q = (rank - step) % size
+
+        local_C[:, q * n:(q + 1) * n] = local_A @ local_B
+
+        if step < size - 1:
+            comm.Sendrecv(
+                sendbuf=local_B,
+                dest=(rank + 1) % size,
+                recvbuf=next_B,
+                source=(rank - 1) % size
+            )
+
+            local_B, next_B = next_B, local_B
+
+    # Gather results.
+    if rank == 0:
+        result = np.empty((matrix_n, matrix_n), dtype=np.float64)
+    else:
+        result = None
+
+    comm.Gather(local_C, result, root=0)
+
+    return result if rank == 0 else None
+```
+
+We test P=1, 2, 4 with N=P and N=3P. We use random matrices and identity, zero, diagonal, and dense matrices with known results.
+
+- Random: A and B contain values from 0 to 1 (seed=2026). Compare C with `A @ B`.
+
+Known-result examples for N=2:
+
+- Identity: `A=[[1,0],[0,1]]`, `B=[[1,2],[3,4]]`; expected `C=[[1,2],[3,4]]`.
+- Zero: `A=[[0,0],[0,0]]`, same B; expected `C=[[0,0],[0,0]]`.
+- Diagonal: `A=[[1,0],[0,2]]`, same B; expected `C=[[1,2],[6,8]]`.
+- Dense: `A=[[1,1],[1,1]]`, `B=[[2,2],[2,2]]`; expected `C=[[4,4],[4,4]]`.
+
+```{python}
+import subprocess
+
+for p in [1, 2, 4]:
+    result = subprocess.run(
+        ["mpirun", "-n", str(p), "python", "a7_test.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    print(result.stdout)
+```
+
+## Exercise 7.2
+
+In my understanding, 
+```python
+req_recv = comm.Irecv()
+req_send = comm.Isend()
+# processing
+req_recv.Wait()
+req_send.Wait()
+```
+With this order of calling them, the deadlock doesn't happen, since receiving and sending are running parallely. 
+
+```python
+def ring_matrix_async_multiplication(A_rowbl, B_colbl):
+    matrix_n = comm.bcast(A_rowbl.shape[1] if rank == 0 else None, root=0)
+    n = matrix_n // size
+
+    if matrix_n % size != 0:
+        raise ValueError("matrix_n must be divisible by size")
+
+    local_A = np.ascontiguousarray(A_rowbl, dtype=np.float64)
+    local_B = np.ascontiguousarray(B_colbl, dtype=np.float64).copy()
+
+    local_C = np.empty((n, matrix_n), dtype=np.float64)
+    next_B = np.empty_like(local_B)
+
+    # Calculation.
+    for step in range(size):
+        q = (rank - step) % size
+
+        if step < size - 1:
+            req_recv = comm.Irecv(
+                next_B,
+                source=(rank - 1) % size
+            )
+            req_send = comm.Isend(
+                local_B,
+                dest=(rank + 1) % size
+            )
+
+        local_C[:, q * n:(q + 1) * n] = local_A @ local_B
+
+        if step < size - 1:
+            req_recv.Wait()
+            req_send.Wait()
+
+            local_B, next_B = next_B, local_B
+
+    # Gather results.
+    if rank == 0:
+        result = np.empty((matrix_n, matrix_n), dtype=np.float64)
+    else:
+        result = None
+
+    comm.Gather(local_C, result, root=0)
+
+    return result if rank == 0 else None
+```
+
+Exercise 7.2a:
+```{python}
+for p in [1, 2, 4]:
+    result = subprocess.run(
+        ["mpirun", "-n", str(p), "python", "a7_async_test.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    print(result.stdout)
+``` 
+
+Exercise 7.2b:
+I measured the actual computational time and the end-to-end time. To indirectly see the coordination cost in both methods.
+```{python}
+for p in [1, 2, 4]:
+    result = subprocess.run(
+        ["mpirun", "-n", str(p), "python", "a7_async_benchmark.py"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    print(result.stdout)
+```
+
+I couldn't see the significant difference from this experiment. 
+
+## Exercise 7.3
+
+```{python}
+import os
+import json
+import pandas as pd
+import matplotlib.pyplot as plt
+from IPython.display import Markdown, display
+
+env = os.environ.copy()
+env["OPENBLAS_NUM_THREADS"] = "1"
+env["OMP_NUM_THREADS"] = "1"
+process_counts = [1, 2, 4, 8, 16, 32, 64]
+records = []
+for N in [512, 1024, 2048]:
+    for p in process_counts:
+        result = subprocess.run(
+            ["mpirun", "-n", str(p), "python", "a7_benchmark.py", str(N)],
+            env=env, capture_output=True, text=True, check=True,
+        )
+        records.extend(json.loads(line) for line in result.stdout.splitlines())
+
+raw = pd.DataFrame(records)
+display(Markdown(raw.to_markdown(index=False)))
+summary = raw.groupby(["N", "version", "P"]).total.agg(
+    median="median", minimum="min", maximum="max"
+).reset_index()
+baseline = summary[summary.P == 1][["N", "version", "median"]].rename(
+    columns={"median": "T1"}
+)
+summary = summary.merge(baseline, on=["N", "version"])
+summary["speedup"] = summary.T1 / summary["median"]
+summary["efficiency"] = summary.speedup / summary.P
+display(Markdown(summary.to_markdown(index=False)))
+
+fig, axes = plt.subplots(4, 1, figsize=(6, 16))
+for (N, version), data in summary.groupby(["N", "version"]):
+    style = "o-" if version == "blocking" else "s--"
+    label = f"N={N}, {version}"
+    axes[0].plot(data.P, data["median"], style, label=label)
+    axes[1].plot(data.P, data.speedup, style, label=label)
+axes[1].plot(process_counts, process_counts, "k:", label="Ideal S(P)=P")
+for (p, version), data in summary.groupby(["P", "version"]):
+    data = data.sort_values("N")
+    style = "o-" if version == "blocking" else "s--"
+    label = f"P={p}, {version}"
+    axes[2].plot(data.N, data["median"], style, label=label)
+    axes[3].plot(data.N, data.speedup, style, label=label)
+for i, (ax, ylabel) in enumerate(zip(axes, ["Median time (seconds)", "Speedup", "Median time (seconds)", "Speedup"])):
+    ax.set_xlabel("MPI processes (P)" if i < 2 else "Matrix size (N)")
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(process_counts if i < 2 else sorted(summary.N.unique()))
+    ax.grid()
+    ax.legend()
+plt.tight_layout()
+plt.show()
+```
+
+Discussion: The ratio of computation to ring communication is going to increase with increasing N. 
+$$
+\frac{2N^3/P}{(P-1)N^2/P}
+= \frac{2N}{P-1}
+= O(N).
+= O(P^{-1})
+$$
+These theoretical analysis is clearly shown in the second and third figures.
+When we incrase P, the speedup efficiency is going bad, since the ratio of computation is decreasing, communication is more dominant.
+When we increase N, the speedup efficiency is going good, with the same reason. 
+  
+I could't see significant difference between the blocking and non-blocking implementation.
