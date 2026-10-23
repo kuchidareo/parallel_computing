@@ -1,0 +1,16 @@
+## Exercise 8.1
+
+```{python}
+import subprocess
+
+for i in [1, 2, 3]:
+    name = f"OpenCL-helloworld-{i}"
+    subprocess.run(
+        ["g++", f"{name}.cpp", "-o", name, "-lOpenCL"], check=True
+    )
+    result = subprocess.run(
+        [f"./{name}"], capture_output=True, text=True, check=True
+    )
+    print(name)
+    print(result.stdout)
+```
