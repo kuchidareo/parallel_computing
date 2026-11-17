@@ -1,0 +1,138 @@
+## Exercise 10.1
+
+I made this sbatch file, chansing N and ntasks (1,16), (4,4), (16,1).
+Probably, when the ntasks is lower, the parallel processing is more inefficient because of increased communication cost over different nodes.
+
+```bash
+#!/bin/bash
+#SBATCH -J homework10
+
+#SBATCH -N 1
+#SBATCH --ntasks-per-node=16
+
+
+#SBATCH -N 4
+#SBATCH --ntasks-per-node=4
+
+#SBATCH -N 16
+#SBATCH --ntasks-per-node=1
+
+#SBATCH --mem=2048
+#SBATCH -t 00:10:00
+
+module load py-mpi4py/3.1.3
+module load py-numpy/1.22.4
+
+hostname #prints the node's name 
+echo '# nodes: ----------------'
+printenv SLURM_NNODES
+echo '# tasks per node: -------------'
+printenv SLURM_NTASKS_PER_NODE
+
+cd "$SLURM_SUBMIT_DIR"
+
+python3 a10_collect.py
+```
+
+I just re-used homework07 data collection code, and made a10_collect.py.
+This saves `a10_strong.csv` and `a10_weak.csv`.
+So in the HPC, just running this python file and saving these csv files. 
+After the job finishes, run `quarto render homework10.qmd` to make this pdf and visualizations in the local environment.
+
+N=2304 is divisible by 1, 4, 9, and 16.
+We use one warm-up and five runs, reporting the median maximum-rank time.
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+from IPython.display import Markdown, display
+
+layouts = [(1, 16), (4, 4), (16, 1)]
+summaries = []
+plt.rcParams.update({"font.size": 8})
+fig, axes = plt.subplots(1, 3, figsize=(7, 2.7))
+for ax, (nodes, tasks) in zip(axes, layouts):
+    label = f"{nodes} nodes × {tasks} tasks/node"
+    raw = pd.read_csv(f"a10_{nodes}_{tasks}_strong.csv")
+    process_counts = sorted(raw.P.unique())
+    N = int(raw.N.iloc[0])
+    display(Markdown(f"### {label}"))
+    display(Markdown(raw.to_markdown(index=False)))
+    summary = raw.groupby("P").total.agg(
+        median="median", minimum="min", maximum="max"
+    ).reset_index()
+    T1 = summary.loc[summary.P == 1, "median"].iloc[0]
+    summary["speedup"] = T1 / summary["median"]
+    summary["efficiency"] = summary.speedup / summary.P
+    summaries.append(summary)
+    display(Markdown(summary.to_markdown(index=False)))
+    ax.plot(summary.P, summary.speedup, "o-", label="Measured")
+    ax.plot(process_counts, process_counts, "k:", label="Ideal S(P)=P")
+    ax.set_title(f"{label}")
+    ax.set_xlabel("MPI processes (P)")
+    ax.set_ylabel("Relative speedup")
+    ax.set_xticks(process_counts)
+    ax.grid()
+    ax.legend(fontsize=7)
+plt.tight_layout()
+plt.show()
+```
+
+As we expected, 1 nodes x 16 tasks pair shows the similar speedup that I got in the homework07.  
+However, 4 nodes x 4 tasks pair shows the similar speedup until P=4, then after because of the communication between nodes, the efficiency significantly drops.  
+The 16 nodes x 1 tasks pair shows the drop from P=4.
+
+## Exercise 10.2
+
+```{python}
+fig, axes = plt.subplots(1, 3, figsize=(7, 2.7), sharey=True)
+for ax, (nodes, tasks), summary in zip(axes, layouts, summaries):
+    ax.plot(summary.P, summary.efficiency, "o-")
+    ax.axhline(1, color="black", linestyle=":", label="Ideal E(P)=1")
+    ax.set_title(f"{nodes} nodes × {tasks} tasks/node")
+    ax.set_xlabel("MPI processes (P)")
+    ax.set_ylabel("Efficiency")
+    ax.set_xticks(summary.P)
+    ax.set_yscale("log")
+    ax.grid()
+    ax.legend(fontsize=7)
+plt.tight_layout()
+plt.show()
+```
+
+These plots are essentially the same as the previous plot. The y-axis scale is the same across 3 plots for easy comparison.  
+The efficiency drops significantly when it starts communicating with different nodes.
+
+## Exercise 10.3
+
+We follow the assignment's N=n*P rule with n=144 and the same timing protocol.
+For dense matrix multiplication, this rule does not keep computation per process constant.
+
+```{python}
+fig, axes = plt.subplots(1, 3, figsize=(7, 2.7), sharey=True)
+for ax, (nodes, tasks) in zip(axes, layouts):
+    label = f"{nodes} nodes × {tasks} tasks/node"
+    raw = pd.read_csv(f"a10_{nodes}_{tasks}_weak.csv")
+    n = int(raw.N.iloc[0] // raw.P.iloc[0])
+    display(Markdown(f"### {label}"))
+    display(Markdown(raw.to_markdown(index=False)))
+    weak = raw.groupby(["P", "N"]).total.agg(
+        median="median", minimum="min", maximum="max"
+    ).reset_index()
+    T1 = weak.loc[weak.P == 1, "median"].iloc[0]
+    weak["scaled_efficiency"] = T1 / weak["median"]
+    display(Markdown(weak.to_markdown(index=False)))
+    ax.plot(weak.P, weak.scaled_efficiency, "o-")
+    ax.set_title(f"{label}")
+    ax.set_xlabel("MPI processes (P)")
+    ax.set_ylabel("Scaled efficiency")
+    ax.set_yscale("log")
+    ax.set_xticks(weak.P)
+    ax.grid()
+plt.tight_layout()
+plt.show()
+```
+
+This is an interesting result. The y-axis scale is the same across 3 plots for easy comparison.  
+At P=4, all 3 settings show the similar efficiency.  
+This suggests that communication between nodes introduces substantial overhead when N is large. However, when N is sufficiently small, the inter-node communication overhead is comparable to that of intra-node communication.  
