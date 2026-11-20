@@ -1,0 +1,29 @@
+## Exercise 12.1
+Just installed pyspark with pip install.
+
+## Exercise 12.2
+
+```{python}
+import subprocess
+import sys
+
+result = subprocess.run(
+    [sys.executable, "12-1-example.py"],
+    capture_output=True,
+    text=True,
+)
+print(result.stdout)
+print(result.stderr)
+result.check_returncode()
+```
+
+If I understand correctly. The evolution from MapReduce to Spark can be explained ... 
+The MapReduce supposes relatively simple process. like one or two step aggregating process. 
+But as time goes, the task is goign ot be complex, then saving and loading intermediate results is now bottleneck.
+So there was a motivation to fit in this complex situation removing the bottleneck.
+
+Then Spark comes, the core innovation is proposing RDD, which handles intermediate results more efficiently. 
+It doesn't save and load, now the challenge here is the fault torrelance.  
+
+So this RDD ensures immutability. patition level recovering. by doing that it can make so called lineage that is used efficient recovering from fault.
+
