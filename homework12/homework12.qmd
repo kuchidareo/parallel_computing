@@ -1,0 +1,129 @@
+## Exercise 12.1
+Just installed pyspark with pip install.
+
+## Exercise 12.2
+
+```
+# compute b 
+b = Aspark.map(lambda row: np.dot(row, x))
+```
+Computing b can be done by using this map function. 
+
+```{python}
+import subprocess
+import sys
+
+row = 10
+column = 10
+partitions = 2
+
+result = subprocess.run(
+    [sys.executable, "sparkMatVecMult.py", str(row), str(column), str(partitions), "--check"],
+    capture_output=True,
+    text=True,
+)
+print(result.stdout)
+```
+
+If I understand correctly, the evolution from MapReduce to Spark can be explained as follows.  
+
+MapReduce was originally designed for relatively simple data processing tasks, such as one- or two-step aggregation. However, over time, data processing tasks became increasingly complex, and repeatedly writing and reading intermediate results to and from disk became a major bottleneck. This motivated the development of a new framework that could handle more complex workloads while eliminating this bottleneck.  
+
+Spark addressed this problem by introducing RDDs (Resilient Distributed Datasets), which allow intermediate results to be handled more efficiently, particularly by keeping them in memory rather than repeatedly writing them to disk. However, this introduces a new challenge: fault tolerance.  
+
+To address this challenge, RDDs are designed to be immutable and support partition-level recovery. Spark maintains what is called lineage, which records the sequence of transformations used to create an RDD. This allows Spark to efficiently recover from failures by recomputing only the lost partitions, rather than recomputing the entire dataset.  
+
+## Exercise 12.3
+
+The arguments are rows, columns, and Spark partitions.
+We compare 1, 2, 4, and 8 cores with 32,000 rows, 1,000 columns, and 100 partitions. Each configuration uses the same input and runs once. Timing includes RDD creation and collection, but excludes Spark startup and input generation.
+
+```bash
+for cores in 1 2 4 8; do
+    echo "Cores: $cores"
+    spark-submit --master "local[$cores]" --executor-memory 1000M --driver-memory 6000M sparkMatVecMult.py $rows $cols $partitions || exit $?
+done
+```
+
+```{python}
+import re
+from pathlib import Path
+from IPython.display import Markdown, display
+
+result = subprocess.run(
+    ["sbatch", "--wait", "--parsable", "homework12.sbatch"],
+    capture_output=True,
+    text=True,
+)
+print(result.stderr)
+
+job_id = result.stdout.strip().split(";")[0]
+if job_id:
+    batch_output = Path(f"sparkjob-{job_id}.out").read_text()
+    for line in batch_output.splitlines():
+        if line.startswith(("Cores:", "Rows:", "Time taken:")):
+            print(line)
+result.check_returncode()
+
+measurements = re.findall(r"^Cores: (\d+).*?^Time taken: ([0-9.]+)", batch_output, re.MULTILINE | re.DOTALL)
+times = [(int(cores), float(seconds)) for cores, seconds in measurements]
+T1 = times[0][1]
+table = "| Cores | Time (seconds) | Speedup |\n| :---: | ---: | ---: |\n"
+for cores, seconds in times:
+    table += f"| {cores} | {seconds:.6f} | {T1 / seconds:.2f} |\n"
+display(Markdown(table))
+print(f"The 8-core run took {times[-1][1]:.6f} seconds, compared with {T1:.6f} seconds for 1 core. The time ratio T(1)/T(8) was {T1 / times[-1][1]:.2f}.")
+```
+
+
+## Exercise 12.4
+
+```python
+# For task 1
+def calculate_average(data):
+    key, values = data
+    average = sum(values) / len(values)
+    return (key, average)
+
+# For task 2
+def calculate_min_max(data):
+    key, values = data
+    minimum = min(values)
+    maximum = max(values)
+    return (key, minimum, maximum)
+
+# For task 3
+def calculate_top_bottom3(data):
+    key, values = data
+    balances = sorted(values)
+    top3 = balances[-3:][::-1]
+    bottom3 = balances[:3]
+    return (key, top3, bottom3)
+
+# For task 5 - Filtering is the key
+filtered_accounts = accounts.filter(
+    lambda x: re.search(
+        rf"(?<!\d){year}(?!\d)", str(x[5])
+    ) is not None
+)
+```
+
+```python
+city_average = accounts\
+    .map(lambda x: (x[4], x[2]))\
+    .groupByKey()\
+    .map(calculate_average)
+```
+For example by running map to filter the colum and groupByKey, then mapping the determined function. 
+
+```{python}
+with open("output12_4.txt", "w") as output:
+    subprocess.run(
+        [sys.executable, "sparkAccountBalance.py", "2001"],
+        stdout=output,
+        check=True,
+    )
+
+lines = Path("output12_4.txt").read_text().splitlines()
+print("\n".join(lines[:20]))
+```
