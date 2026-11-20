@@ -1,0 +1,113 @@
+## Exercise 11.1
+
+Just setting up with IntelliJ IDEA education account.
+We were actually struggling to download this because of the outlook connection error on Friday.
+
+## Exercise 11.2
+
+This is just opening the project files. 
+
+## Exercise 11.3
+
+Again, we were struggling because the gutenberg.org is under maintainance because of some security issues.
+Instead of that, I used https://archive.org/. query is gutenberg, filtering by texts and English.  
+I took 5 books called: 'Sound', 'The Battle of Verdun', 'The country of Sir Walter Scott', 'The Marne Battle-fields', 'The New England Country'.   
+And I configured that in the `output` directory the word count file 'part-r-000000'. 
+
+I was actually confused by the instruction in the course webpage.  
+ - Create a new folder named **in** inside your project. We will put all the input files for the WordCount MapReduce application there.  
+I first made the directiry with the name 'in', but it doesn't work, because later we set 'input output' in the configuration setup.
+
+## Exercise 11.4
+
+If I understand correctly, defining and transforming into these Hadoop original types is important to support efficient `serialization`, `comparison`, `partitioning`.
+To support these 3, we need to align all key-value data to Hadoop-compatible types.
+
+For the practical task, to achieve that goal, it is obvious that we should change the `TokenizerMapper`.
+And in this map function, we don't have to only use Hadoop types.
+
+```java
+// public void map(Object key, Text value, Context context
+//                 ) throws IOException, InterruptedException {
+//     StringTokenizer itr = new StringTokenizer(value.toString());
+//     while (itr.hasMoreTokens()) {
+//     word.set(itr.nextToken());
+//     context.write(word, one);
+//     }
+// }
+
+public void map(Object key, Text value, Context context
+                ) throws IOException, InterruptedException {
+    StringTokenizer itr = new StringTokenizer(value.toString());
+    while (itr.hasMoreTokens()) {
+        String w = itr.nextToken().toLowerCase().replaceAll("[^a-z]", "");
+        if (w.isEmpty()) continue;
+        word.set(w);
+        context.write(word, one);
+    }
+}
+```
+This might be one solution.
+I attached the `11-4-output/part-r-00000`. Something like
+```text
+a	8875
+abailard	3
+abandon	16
+abandoned	25
+abandoning	3
+abb	21
+abbatial	2
+abbess	2
+abbesses	1
+abbey	129
+```
+
+## Exercise 11.5
+
+```java
+protected void setup(Context context) {
+    String[] values = context.getConfiguration()
+            .get("vector_values").split(",");
+
+    vector = new double[values.length];
+    for (int j = 0; j < values.length; j++) {
+    vector[j] = Double.parseDouble(values[j].trim());
+    }
+}
+```
+This is added to the Mapper because we need to split the comma-separated vector values and convert them into a double array.
+In matrix-vector multiplication, each row can be calculated independently, so MapReduce is useful.
+We only need to define the independent computations that make up the overall task. Hadoop manages how to distribute and execute these computations across different machines and collects the results.
+
+Matrix.csv
+```
+0,1,2,3
+1,4,5,6
+2,7,8,9
+3,10,11,12
+```
+
+Vector.txt
+```
+-2,1,0
+```
+
+part-r-000000
+```
+0	0.0
+1	-3.0
+2	-6.0
+3	-9.0
+```
+
+Answer the following questions:
+Why is the IntSumReducer class in the WordCount example used not only as a reducer (job.setReducerClass) but also as a combiner (job.setCombinerClass):  
+This is because the total count numbers is the same. we can change the order of summation(associative) and group the values(commutative) differently without affecting the final result. 
+
+
+What advantages (if any) does it provide?:  
+Withiout combiner, we need to send lots of intermediate pairs such as (the, 1) across different devices, which is goign to be inefficient. Combiner addresses that point.
+
+
+Can all possible Reduce functions be used directly as combiners?  
+Not really, the average of averages are not true always. E.g. [1, 2], [3, 4, 5, 6]. We need to consider that the number of elements in the group can be different.
